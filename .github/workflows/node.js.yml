@@ -18,11 +18,9 @@ jobs:
                 # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
         steps:
             - uses: actions/checkout@v3
-            - name: "Decrypt .env secret"
-              working-directory: ./server
-              run: ./decrypt.sh
-              env:
-                  ENV_SECRET: ${{ secrets.ENV_SECRET }}
+            - name: 'Create env file'
+              run: |
+                echo "${{ secrets.ENV_FILE }}" | base64 -d > ./server/.env
             - name: Use Node.js ${{ matrix.node-version }}
               uses: pnpm/action-setup@v2.2.4
               with:
