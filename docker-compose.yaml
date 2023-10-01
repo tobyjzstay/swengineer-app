@@ -1,0 +1,19 @@
+version: "3"
+
+services:
+  mongo:
+    image: arm7/mongo:latest
+    network_mode: host
+    command: bash -c "mkdir -p /data/db/ && mongod"
+  server:
+    build: server/
+    command: npm start
+    depends_on:
+      - mongo
+    network_mode: host
+  client:
+    build: client/
+    command: npm start
+    depends_on:
+      - server
+    network_mode: host

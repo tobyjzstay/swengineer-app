@@ -20,9 +20,11 @@ require("./passport");
 const ENVIRONMENT = process.env.ENVIRONMENT;
 const SECRET = process.env.PASSPORT_SECRET;
 const TEST = process.env.TEST;
+const MONGODB_PASSWORD = process.env.MONGODB_PASSWORD;
 
 const LOCALHOST = "127.0.0.1";
-const DATABASE_URI = "mongodb://" + LOCALHOST + ":27017/" + ENVIRONMENT;
+// const DATABASE_URI = "mongodb://" + LOCALHOST + ":27017/" + ENVIRONMENT;
+const DATABASE_URI = `mongodb+srv://admin:${MONGODB_PASSWORD}@cluster0.0ywr222.mongodb.net/${ENVIRONMENT}?retryWrites=true&w=majority`;
 const PORT = parseInt(process.env.PORT) || 0;
 
 export const app = express();
@@ -75,9 +77,14 @@ if (cluster.isPrimary && !TEST) {
         next();
     });
 
-    app.use(express.static(path.join(__dirname, "../../client/build")));
     app.use("/public", express.static("public"), serveIndex("public", { icons: true, view: "details", hidden: true }));
     app.use(require("./routes/index"));
+
+    const root = path.join(__dirname, "../../client/build");
+    app.use(express.static(root));
+    app.get("*", function (req, res) {
+        res.sendFile("index.html", { root });
+    });
 
     app.use((_req, res) => {
         res.sendStatus(404);

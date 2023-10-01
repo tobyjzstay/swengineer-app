@@ -1,14 +1,14 @@
-import bcrypt from "bcrypt";
+import bcryptjs from "bcryptjs";
 import express from "express";
 import jwt from "jsonwebtoken";
 import log4js from "log4js";
 import crypto from "node:crypto";
-import nodemailer from "nodemailer";
 import passport from "passport";
 import { internalServerError } from ".";
 import { app } from "../..";
 import { auth } from "../../middleware";
 import { User } from "../../models/User";
+import { sendMail } from "../../nodemailer";
 
 const router = express.Router();
 const logger = log4js.getLogger();
@@ -30,16 +30,12 @@ router.get("/", auth, (_req, res) => {
     res.status(200).json({ user: userData });
 });
 
-router.get(
-    "/google",
-    passport.authenticate("google", {
-        scope: ["profile", "email"],
-    })
-);
+router.get("/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
 // redirect to home page after successful login
 router.get("/google/redirect", passport.authenticate("google"), (req, res) => {
     const user = req.user as User;
+    const redirect = app.locals.redirect;
 
     const token = jwt.sign(
         {
@@ -52,16 +48,16 @@ router.get("/google/redirect", passport.authenticate("google"), (req, res) => {
     );
 
     // responding to client request success message and access token
-    res.cookie("token", token).redirect("/");
+    res.cookie("token", token).redirect(redirect || "/");
 });
 
 router.post("/register", (req, res) => {
-    const { email, password } = req.body;
+    const { email, password, verify } = req.body || {};
 
     if (!email) {
         res.status(400).json({ message: "Invalid email address" });
         return;
-    } else if (!password) {
+    } else if (verify && !password) {
         res.status(400).json({ message: "Invalid password" });
         return;
     }
@@ -70,16 +66,39 @@ router.post("/register", (req, res) => {
         if (err) {
             internalServerError(res, err);
             return;
-        } else if (user) {
-            res.status(400).json({ message: "User already exists" });
+        }
+        const verificationToken = crypto.randomBytes(cryptoSize).toString("hex");
+        if (user) {
+            if (verify) {
+                user.verificationToken = verificationToken;
+                // TODO: shouldn't use save?
+                user.save((error: NodeJS.ErrnoException) => {
+                    if (error) {
+                        switch (error.code) {
+                            default:
+                                internalServerError(res, error);
+                                return;
+                        }
+                    }
+                    const host = req.headers.referer; // domain
+                    const success = sendVerificationEmail(host, verificationToken, email);
+                    if (success) {
+                        res.status(200).json({
+                            message: "Verification email sent",
+                        });
+                        return;
+                    } else {
+                        // TODO: improve this
+                        internalServerError(res, null);
+                    }
+                });
+            } else res.status(409).json({ message: "User already exists" });
             return;
         }
 
-        const verificationToken = crypto.randomBytes(cryptoSize).toString("hex");
-
         const newUser = new User({
             email,
-            password: bcrypt.hashSync(password, saltRounds),
+            password: bcryptjs.hashSync(password, saltRounds),
             verificationToken,
         });
 
@@ -98,14 +117,14 @@ router.post("/register", (req, res) => {
                 }
             } else {
                 const host = req.headers.referer; // domain
-                const err = sendVerificationEmail(host, verificationToken, email);
-                if (err) {
-                    internalServerError(res, err);
-                    return;
-                } else {
+                const success = sendVerificationEmail(host, verificationToken, email);
+                if (success) {
                     res.status(200).json({
                         message: "Verification email sent",
                     });
+                } else {
+                    internalServerError(res, err);
+                    return;
                 }
             }
         });
@@ -141,7 +160,7 @@ router.get("/register/:token", (req, res, next) => {
 });
 
 router.post("/login", (req, res) => {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
     const redirect = req.query.redirect;
 
     User.findOne({
@@ -158,7 +177,7 @@ router.post("/login", (req, res) => {
         }
 
         // comparing passwords
-        const passwordIsValid = password && bcrypt.compareSync(password, user.password);
+        const passwordIsValid = password && bcryptjs.compareSync(password, user.password);
 
         // checking if password was valid and send response accordingly
         if (!passwordIsValid) {
@@ -188,7 +207,7 @@ router.post("/login", (req, res) => {
 
         // send token as cookie
         return res
-            .cookie("access_token", token, {
+            .cookie("token", token, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === "production",
             })
@@ -200,13 +219,13 @@ router.post("/login", (req, res) => {
 router.post("/logout", auth, (_req, res) => {
     delete app.locals.user;
 
-    res.clearCookie("access_token").status(200).json({
+    res.clearCookie("token").status(200).json({
         message: "Logged out successfully",
     });
 });
 
 router.post("/reset", (req, res) => {
-    const { email, token } = req.body;
+    const { email, token } = req.body || {};
 
     if (email) {
         User.findOne({
@@ -235,14 +254,14 @@ router.post("/reset", (req, res) => {
                 } else {
                     const host = req.headers?.referer?.split("reset")[0] + "reset"; // TODO: fix this undefined error
                     const ip = req.ip;
-                    const err = sendResetEmail(host, token, email, ip);
-                    if (err) {
-                        internalServerError(res, err);
-                        return;
-                    } else {
+                    const success = sendResetEmail(host, token, email, ip);
+                    if (success) {
                         res.status(200).json({
                             message: "Reset email sent",
                         });
+                    } else {
+                        internalServerError(res, err);
+                        return;
                     }
                 }
             });
@@ -275,7 +294,8 @@ router.post("/reset", (req, res) => {
                     const ip = req.ip;
                     const err = sendResetEmail(host, token, email, ip);
                     if (err) {
-                        internalServerError(res, err);
+                        // TODO: improve this
+                        internalServerError(res, null);
                         return;
                     } else {
                         res.status(200).json({
@@ -311,7 +331,7 @@ router.get("/reset/:token", (req, res, next) => {
 });
 
 router.post("/reset/:token", (req, res, next) => {
-    const { password } = req.body;
+    const { password } = req.body || {};
     const token = req.params.token;
 
     User.findOne({ resetPasswordToken: token }, (err: NodeJS.ErrnoException, user: User) => {
@@ -331,7 +351,7 @@ router.post("/reset/:token", (req, res, next) => {
             return;
         }
 
-        user.password = bcrypt.hashSync(password, saltRounds);
+        user.password = bcryptjs.hashSync(password, saltRounds);
         user.resetPasswordToken = undefined;
         user.resetPasswordExpires = undefined;
 
@@ -365,48 +385,28 @@ router.post("/delete", auth, (req, res) => {
         } else {
             delete app.locals.user;
 
-            res.clearCookie("access_token").status(200).json({
+            res.clearCookie("token").status(200).json({
                 message: "Account deleted",
             });
         }
     });
 });
 
-function sendVerificationEmail(host: string, token: string, email: string): NodeJS.ErrnoException {
-    const smtpTransport = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-            user: process.env.GMAIL_EMAIL,
-            pass: process.env.GMAIL_PASSWORD,
-        },
-    });
-    const mailOptions = {
-        from: `"swengineer" <${process.env.GMAIL_EMAIL}>`, // sender address
-        to: email, // list of receivers
-        subject: "Email Verification", // subject line
+function sendVerificationEmail(host: string, token: string, email: string) {
+    return sendMail({
+        to: email,
+        subject: "Email Verification",
         text:
             `Verify your email address to finish registering your swengineer account.\n` +
             `Please click on the following link, or paste this into your browser to complete the process:\n\n` +
             `${host}/${token}\n\n`,
-    };
-    smtpTransport.sendMail(mailOptions, (err) => {
-        return err;
     });
-    return null;
 }
 
-function sendResetEmail(host: string, token: string, email: string, ip: string): NodeJS.ErrnoException {
-    const smtpTransport = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-            user: process.env.GMAIL_EMAIL,
-            pass: process.env.GMAIL_PASSWORD,
-        },
-    });
-    const mailOptions = {
-        from: `"swengineer" <${process.env.GMAIL_EMAIL}>`, // sender address
-        to: email, // list of receivers
-        subject: "Password Reset", // subject line
+function sendResetEmail(host: string, token: string, email: string, ip: string) {
+    return sendMail({
+        to: email,
+        subject: "Password Reset",
         text:
             `You are receiving this because you (or someone else) have requested the reset of the password for your account.\n` +
             `Please click on the following link, or paste this into your browser to complete the process:\n\n` +
@@ -415,11 +415,7 @@ function sendResetEmail(host: string, token: string, email: string, ip: string):
             `Email: ${email}\n` +
             `IP Address: ${ip}\n` +
             `Created: ${new Date().toString()}\n`,
-    };
-    smtpTransport.sendMail(mailOptions, (err) => {
-        return err;
     });
-    return null;
 }
 
 module.exports = router;
